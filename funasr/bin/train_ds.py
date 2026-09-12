@@ -256,6 +256,8 @@ def main(**kwargs):
         trainer.start_data_split_i = 0
         trainer.validate_epoch(model=model, dataloader_val=dataloader_val, epoch=epoch + 1)
         current_val = trainer.val_loss_avg
+        from funasr.train_utils import tpa_hooks
+        tpa_hooks.probe_val(trainer.val_loss_avg, trainer.val_acc_avg)
 
         if current_val < best_val_loss:
             logging.info(f"current_val: {current_val}, best_val_loss: {best_val_loss}")

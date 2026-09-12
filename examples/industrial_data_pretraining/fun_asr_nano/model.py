@@ -13,6 +13,7 @@ import torch.nn as nn
 from funasr.metrics.compute_acc import compute_accuracy
 from funasr.register import tables
 from funasr.train_utils.device_funcs import force_gatherable, to_device
+from funasr.train_utils import tpa_hooks
 from funasr.utils.datadir_writer import DatadirWriter
 from funasr.utils.load_utils import extract_fbank, load_audio_text_image_video
 from funasr.models.fun_asr_nano.checkpoint_utils import (
@@ -274,6 +275,7 @@ class FunASRNano(nn.Module):
             preds = torch.argmax(model_outputs.logits, -1)
             acc_att = compute_accuracy(preds[:, :-1], labels_ids[:, 1:], ignore_label=-100)
             stats["acc"] = acc_att
+            tpa_hooks.probe_logits(model_outputs.logits, preds, labels_ids)
 
         stats["loss"] = torch.clone(loss.detach())
         stats["batch_size"] = batch_size

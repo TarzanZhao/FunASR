@@ -19,6 +19,7 @@ from funasr.train_utils.checkpoint_metrics import (
 )
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 import funasr.utils.misc as misc_utils
+from funasr.train_utils import tpa_hooks
 
 try:
     import wandb
@@ -635,11 +636,14 @@ class Trainer:
         iterator_stop = torch.tensor(0).to(self.device)
 
         dataloader_train.batch_sampler.set_epoch(epoch)
+        _tpa_prof = tpa_hooks.Profiler(self.rank)
+        _tpa_times = tpa_hooks.StepTimes()
         time_beg = time.perf_counter()
         time5 = time_beg
         for batch_idx, batch in enumerate(dataloader_train):
             self.batch_total += 1
             self.step_in_epoch += 1
+            tpa_hooks.on_step_begin(self.step_in_epoch)
             loss_dict = {
                 "speed_stats": {},
                 "epoch": epoch,
@@ -655,6 +659,7 @@ class Trainer:
             loss_dict["speed_stats"]["data_load"] = f"{time1-time_beg:0.3f}"
 
             batch = to_device(batch, self.device, non_blocking=True)
+            tpa_hooks.probe_batch(batch)
 
             my_context = nullcontext
             if self.use_ddp or self.use_fsdp:
@@ -665,6 +670,7 @@ class Trainer:
                 time2 = time.perf_counter()
 
                 self.forward_step(model, batch, loss_dict=loss_dict)
+                tpa_hooks.probe_forward(loss_dict)
 
                 time3 = time.perf_counter()
                 loss_dict["speed_stats"]["forward_time"] = f"{time3 - time2:0.3f}"
@@ -674,12 +680,14 @@ class Trainer:
                 loss_dict["speed_stats"]["backward_time"] = f"{time4 - time3:0.3f}"
 
             self.update_step(model, optim, scheduler, scaler, loss_dict=loss_dict)
+            _tpa_prof.step()
             total_time = f"{(time.perf_counter() - time5):0.3f}"
             time5 = time.perf_counter()
 
             loss_dict["speed_stats"]["optim_time"] = f"{time5 - time4:0.3f}"
 
             loss_dict["speed_stats"]["total_time"] = total_time
+            _tpa_times.record(self.step_in_epoch, loss_dict["speed_stats"])
 
             loss_dict["lr"] = scheduler.get_last_lr()[0]
             loss_dict["batch_num_epoch"] = len(dataloader_train)
@@ -721,6 +729,8 @@ class Trainer:
 
             time_beg = time.perf_counter()
 
+        _tpa_prof.stop()
+        _tpa_times.flush()
         if self.use_ddp or self.use_fsdp or self.use_deepspeed:
             train_loss_avg = torch.tensor(self.train_loss_avg, dtype=torch.float32).to(self.device)
             train_acc_avg = torch.tensor(self.train_acc_avg, dtype=torch.float32).to(self.device)
@@ -804,6 +814,7 @@ class Trainer:
                 else:
                     optim.step()
                 scheduler.step()
+                tpa_hooks.probe_update(model, grad_norm if self.grad_clip > 0 else None)
                 # Clear gradients for the next accumulation stage
                 optim.zero_grad(set_to_none=True)
 
@@ -826,6 +837,7 @@ class Trainer:
 
         if self.use_ddp or self.use_fsdp or self.use_deepspeed:
             dist.barrier()
+        tpa_hooks.on_step_begin(0)  # 0 = not a training step; model-side probes skip it
         logging.info(f"Validate epoch: {epoch}, rank: {self.rank}\n")
         model.eval()
 
